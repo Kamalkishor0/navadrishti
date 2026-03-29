@@ -12,13 +12,33 @@ const prepareRateLimitStore = new Map<string, number>();
 
 const normalizeEmail = (value: string) => value.trim().toLowerCase();
 
-const isAlreadyRegisteredError = (message: string) => {
-  const normalized = message.toLowerCase();
+const isAlreadyRegisteredError = (error: unknown) => {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const maybeError = error as {
+    message?: string;
+    code?: string;
+    status?: number;
+    name?: string;
+  };
+
+  const normalizedMessage = (maybeError.message || '').toLowerCase();
+  const normalizedCode = (maybeError.code || '').toLowerCase();
+  const status = maybeError.status;
+
   return (
-    normalized.includes('already registered') ||
-    normalized.includes('already exists') ||
-    normalized.includes('duplicate') ||
-    normalized.includes('user already registered')
+    normalizedMessage.includes('already registered') ||
+    normalizedMessage.includes('already been registered') ||
+    normalizedMessage.includes('already exists') ||
+    normalizedMessage.includes('duplicate') ||
+    normalizedMessage.includes('user already registered') ||
+    normalizedMessage.includes('user already exists') ||
+    normalizedCode.includes('user_already_exists') ||
+    normalizedCode.includes('email_exists') ||
+    status === 409 ||
+    status === 422
   );
 };
 
@@ -33,6 +53,18 @@ const cleanupRateLimitStore = () => {
 
 export async function POST(req: NextRequest) {
   try {
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      return NextResponse.json(
+        {
+          error:
+            process.env.NODE_ENV === 'development'
+              ? 'Failed to prepare email OTP session: SUPABASE_SERVICE_ROLE_KEY is not set'
+              : 'Failed to prepare email OTP session'
+        },
+        { status: 500 }
+      );
+    }
+
     const body = await req.json();
     const validationResult = prepareEmailOtpSchema.safeParse(body);
 
@@ -57,9 +89,23 @@ export async function POST(req: NextRequest) {
       email_confirm: true
     });
 
-    if (error && !isAlreadyRegisteredError(error.message || '')) {
-      console.error('Prepare email OTP error:', error);
-      return NextResponse.json({ error: 'Failed to prepare email OTP session' }, { status: 500 });
+    if (error && !isAlreadyRegisteredError(error)) {
+      const errorMessage = (error as { message?: string }).message || 'Unknown error';
+      console.error('Prepare email OTP error:', {
+        message: (error as { message?: string }).message,
+        code: (error as { code?: string }).code,
+        status: (error as { status?: number }).status,
+        name: (error as { name?: string }).name
+      });
+      return NextResponse.json(
+        {
+          error:
+            process.env.NODE_ENV === 'development'
+              ? `Failed to prepare email OTP session: ${errorMessage}`
+              : 'Failed to prepare email OTP session'
+        },
+        { status: 500 }
+      );
     }
 
     prepareRateLimitStore.set(email, Date.now());
